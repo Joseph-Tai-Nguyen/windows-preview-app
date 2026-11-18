@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- WinPreview app icon (original artwork): two fanned PDF pages on a blue tile.
+       Source of truth for winpreview.ico; regenerate with scripts/make_icon.py. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3B8BF0"/>
+      <stop offset="1" stop-color="#1B4FB8"/>
+    </linearGradient>
+    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#EEF3FC"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="url(#tile)"/>
+
+  <!-- back page, fanned left -->
+  <g transform="rotate(-12 118 132)">
+    <rect x="62" y="50" width="112" height="150" rx="12" fill="#FFFFFF" opacity="0.55"/>
+  </g>
+
+  <!-- front page shadow -->
+  <path d="M104 70 H170 L208 108 V206 a12 12 0 0 1 -12 12 H104 a12 12 0 0 1 -12 -12 V82 a12 12 0 0 1 12 -12 Z"
+        fill="#0B2A66" opacity="0.28" transform="translate(4 6)"/>
+  <!-- front page with folded corner -->
+  <path d="M104 70 H170 L208 108 V206 a12 12 0 0 1 -12 12 H104 a12 12 0 0 1 -12 -12 V82 a12 12 0 0 1 12 -12 Z"
+        fill="url(#page)"/>
+  <path d="M170 70 V98 a10 10 0 0 0 10 10 H208 Z" fill="#C5D8F7"/>
+
+  <!-- text lines + accent -->
+  <rect x="110" y="122" width="78" height="12" rx="6" fill="#9DB8E8"/>
+  <rect x="110" y="145" width="78" height="12" rx="6" fill="#9DB8E8"/>
+  <rect x="110" y="168" width="56" height="12" rx="6" fill="#9DB8E8"/>
+  <rect x="110" y="191" width="40" height="12" rx="6" fill="#F59E2E"/>
+</svg>
