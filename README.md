@@ -10,6 +10,7 @@ Open a PDF, see every page as a thumbnail, and fix the document directly:
   - **Page from File…**: every page of another PDF, or an image (PNG, JPEG, TIFF, BMP, GIF) as a page
   - **Blank Page**: the same size as the selected page
   - **Page from Scanner…**: through the standard Windows scan dialog (WIA)
+- **Export pages as images**: **File › Export as Image…** saves the selected pages as sharp PNG or JPEG files at up to 600 DPI, optionally as PNG with a transparent background.
 - **Drop files** from Explorer onto the sidebar to insert them exactly where you drop them.
 - **Rotate** pages, **undo/redo** everything, and **save** safely (the original is replaced atomically, never half-written).
 
@@ -59,6 +60,7 @@ py -m venv .venv
 | Open / Save / Save As | Ctrl+O / Ctrl+S / Ctrl+Shift+S |
 | Delete selected pages | Delete or Backspace |
 | Insert page from file / blank page | Ctrl+Shift+I / Ctrl+Shift+B |
+| Export selected pages as images | Ctrl+Shift+E |
 | Undo / Redo | Ctrl+Z / Ctrl+Y |
 | Select all pages | Ctrl+A |
 | Zoom in / out / fit width | Ctrl+= / Ctrl+- / Ctrl+0 (or Ctrl+mouse wheel) |
@@ -89,10 +91,11 @@ windows-preview-app/
 │   ├── app.py                 # entry point (QApplication, CLI argument)
 │   ├── __main__.py            # python -m winpreview
 │   ├── core/                  # Qt-free logic, fully unit tested
-│   │   ├── document.py        #   PdfDocument: open/save, delete/move/insert/rotate, undo
+│   │   ├── document.py        #   PdfDocument: open/save, delete/move/insert/rotate, export, undo
 │   │   └── scanner.py         #   Windows Image Acquisition (WIA) scanning
 │   └── ui/                    # PySide6 interface
 │       ├── main_window.py     #   menus, toolbar, actions, orchestration
+│       ├── export_dialog.py   #   Export as Image options (format, DPI)
 │       ├── thumbnail_view.py  #   sidebar thumbnails + drag & drop
 │       ├── page_view.py       #   continuous page view + zoom
 │       ├── page_model.py      #   model shared by both views

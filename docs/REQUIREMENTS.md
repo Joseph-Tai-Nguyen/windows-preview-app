@@ -68,6 +68,7 @@ All operations act on the thumbnail selection, can be undone, and leave the affe
 | PAGE-11 | Drag thumbnails between two document windows. | Could | ⬜ |
 | PAGE-12 | Export the selected pages to a new PDF. | Could | ⬜ |
 | PAGE-13 | Crop pages. | Could | ⬜ |
+| PAGE-14 | **File › Export as Image…** (Ctrl+Shift+E) saves the selected pages as PNG or JPEG at 72–600 DPI (default 300), optionally with a transparent background (PNG only). One page goes to a chosen file; several go to a folder as “<name> - Page N.png”. | Could | ✅ |
 
 When nothing is selected, inserts go after the page currently in view. In an empty document they go at the start.
 
@@ -101,6 +102,7 @@ When nothing is selected, inserts go after the page currently in view. In an emp
 | Close / Exit | Ctrl+W (Ctrl+F4) / Ctrl+Q |
 | Delete selected pages | Delete, Backspace |
 | Insert page from file / blank page | Ctrl+Shift+I / Ctrl+Shift+B |
+| Export selected pages as images | Ctrl+Shift+E |
 | Undo / Redo | Ctrl+Z / Ctrl+Y, Ctrl+Shift+Z |
 | Select all pages | Ctrl+A |
 | Zoom in / out / fit width | Ctrl+= / Ctrl+- / Ctrl+0, Ctrl+mouse wheel |

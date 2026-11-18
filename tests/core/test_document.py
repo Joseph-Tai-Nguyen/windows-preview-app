@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pymupdf
 import pytest
 
 from tests.conftest import page_labels
@@ -242,3 +243,111 @@ def test_render_page(make_pdf):
     page = doc.render_page(0, 0.5)
     assert (page.width, page.height) == (306, 396)
     assert len(page.samples) == page.stride * page.height
+
+
+# ---------------------------------------------------------------- export page image
+def test_export_page_image_png_at_300_dpi(make_pdf, tmp_path):
+    doc = PdfDocument.open(make_pdf(2))
+    target = doc.export_page_image(1, tmp_path / "page2.png")
+
+    assert target == (tmp_path / "page2.png").resolve()
+    pix = pymupdf.Pixmap(target)
+    assert (pix.width, pix.height) == (2550, 3300)  # US Letter at 300 DPI
+    assert (pix.xres, pix.yres) == (300, 300)
+    assert not pix.alpha
+    assert not doc.is_modified
+    assert not doc.can_undo
+
+
+def test_export_page_image_renders_the_right_page(make_pdf, tmp_path):
+    doc = PdfDocument.open(make_pdf(2, sizes=[(612, 792), (300, 200)]))
+    pix = pymupdf.Pixmap(doc.export_page_image(1, tmp_path / "p.png", dpi=144))
+    assert (pix.width, pix.height) == (600, 400)
+
+
+def test_export_page_image_jpeg(make_pdf, tmp_path):
+    doc = PdfDocument.open(make_pdf(1))
+    target = doc.export_page_image(0, tmp_path / "page.JPG", dpi=150, jpeg_quality=80)
+    assert target.read_bytes()[:3] == b"\xff\xd8\xff"
+    pix = pymupdf.Pixmap(target)
+    assert (pix.width, pix.height) == (1275, 1650)
+
+
+def test_export_page_image_respects_rotation(make_pdf, tmp_path):
+    doc = PdfDocument.open(make_pdf(1))
+    doc.rotate_pages([0], 90)
+    pix = pymupdf.Pixmap(doc.export_page_image(0, tmp_path / "rot.png", dpi=72))
+    assert (pix.width, pix.height) == (792, 612)
+
+
+def test_export_page_image_overwrites_and_leaves_no_temp_files(make_pdf, tmp_path):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    target = out_dir / "page.png"
+    target.write_bytes(b"old")
+    doc = PdfDocument.open(make_pdf(1))
+    doc.export_page_image(0, target, dpi=72)
+    assert target.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    assert [p.name for p in out_dir.iterdir()] == ["page.png"]
+
+
+@pytest.mark.parametrize(
+    ("name", "kwargs"),
+    [
+        ("page.gif", {}),
+        ("page", {}),
+        ("page.png", {"dpi": 35}),
+        ("page.png", {"dpi": 1201}),
+        ("page.jpg", {"jpeg_quality": 0}),
+        ("page.jpg", {"jpeg_quality": 101}),
+    ],
+)
+def test_export_page_image_rejects_bad_options(make_pdf, tmp_path, name, kwargs):
+    doc = PdfDocument.open(make_pdf(1))
+    with pytest.raises(DocumentError):
+        doc.export_page_image(0, tmp_path / name, **kwargs)
+    assert list(tmp_path.glob("page*")) == []
+
+
+def test_export_page_image_rejects_huge_render(make_pdf, tmp_path):
+    doc = PdfDocument.open(make_pdf(1, sizes=[(14400, 14400)]))  # 200 x 200 inches
+    with pytest.raises(DocumentError, match="lower resolution"):
+        doc.export_page_image(0, tmp_path / "huge.png", dpi=300)
+
+
+def test_export_page_image_rejects_bad_index(make_pdf, tmp_path):
+    doc = PdfDocument.open(make_pdf(2))
+    with pytest.raises(IndexError):
+        doc.export_page_image(2, tmp_path / "page.png")
+
+
+def test_export_page_image_missing_folder(make_pdf, tmp_path):
+    doc = PdfDocument.open(make_pdf(1))
+    with pytest.raises(DocumentError):
+        doc.export_page_image(0, tmp_path / "missing" / "page.png")
+
+
+def test_export_page_image_transparent_png(make_pdf, tmp_path):
+    doc = PdfDocument.open(make_pdf(1))
+    target = doc.export_page_image(0, tmp_path / "t.png", dpi=72, transparent=True)
+    pix = pymupdf.Pixmap(target)
+    assert pix.alpha
+    assert pix.pixel(pix.width - 1, pix.height - 1)[3] == 0  # empty area is see-through
+    assert max(pix.samples[pix.n - 1 :: pix.n]) == 255  # the text is opaque
+
+
+def test_export_page_image_transparent_keeps_painted_background(tmp_path):
+    source = pymupdf.open()
+    page = source.new_page()
+    page.draw_rect(page.rect, color=None, fill=(1, 1, 1))
+    source.save(tmp_path / "white.pdf")
+    doc = PdfDocument.open(tmp_path / "white.pdf")
+    pix = pymupdf.Pixmap(doc.export_page_image(0, tmp_path / "w.png", dpi=72, transparent=True))
+    assert pix.pixel(0, 0)[3] == 255
+
+
+def test_export_page_image_transparent_requires_png(make_pdf, tmp_path):
+    doc = PdfDocument.open(make_pdf(1))
+    with pytest.raises(DocumentError, match="PNG"):
+        doc.export_page_image(0, tmp_path / "page.jpg", transparent=True)
+    assert not (tmp_path / "page.jpg").exists()

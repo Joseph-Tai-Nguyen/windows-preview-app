@@ -28,6 +28,13 @@ IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", 
 PDF_EXTENSIONS = frozenset({".pdf"})
 INSERTABLE_EXTENSIONS = PDF_EXTENSIONS | IMAGE_EXTENSIONS
 
+# Image formats a page can be exported to, keyed by extension -> PyMuPDF output name.
+EXPORT_IMAGE_FORMATS = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg"}
+DEFAULT_EXPORT_DPI = 300
+EXPORT_DPI_RANGE = (36, 1200)
+# A pixel is 3 bytes (RGB) or 4 (RGBA, transparent), so one render stays under ~600 MB.
+MAX_EXPORT_PIXELS = 150_000_000
+
 # US Letter in PDF points; used for blank pages in an empty document.
 DEFAULT_PAGE_SIZE = (612.0, 792.0)
 DEFAULT_UNDO_LIMIT = 30
@@ -183,6 +190,58 @@ class PdfDocument:
     def render_page(self, index: int, scale: float) -> RenderedPage:
         pix = self._doc[index].get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
         return RenderedPage(pix.width, pix.height, pix.stride, bytes(pix.samples))
+
+    def export_page_image(
+        self,
+        index: int,
+        path: str | os.PathLike[str],
+        *,
+        dpi: int = DEFAULT_EXPORT_DPI,
+        jpeg_quality: int = 95,
+        transparent: bool = False,
+    ) -> Path:
+        """Render page ``index`` to a PNG or JPEG file at ``dpi`` and return its path.
+
+        The format follows the file extension. The page is rendered from its vector
+        content, so text and lines stay sharp at any resolution. The DPI is stored
+        in the file so it prints at the page's real size. The document is not changed.
+
+        ``transparent`` (PNG only) leaves unpainted areas see-through instead of white.
+        A page that paints its own white background stays white.
+        """
+        self._normalize([index])
+        target = Path(path)
+        output = EXPORT_IMAGE_FORMATS.get(target.suffix.lower())
+        if output is None:
+            raise DocumentError(f"“{target.name}” must end in .png, .jpg or .jpeg.")
+        if transparent and output != "png":
+            raise DocumentError("A transparent background needs the PNG format.")
+        low, high = EXPORT_DPI_RANGE
+        if not low <= dpi <= high:
+            raise DocumentError(f"The resolution must be between {low} and {high} DPI.")
+        if not 1 <= jpeg_quality <= 100:
+            raise DocumentError("The JPEG quality must be between 1 and 100.")
+        width, height = self.page_size(index)
+        if (width * dpi / 72) * (height * dpi / 72) > MAX_EXPORT_PIXELS:
+            raise DocumentError(
+                f"Page {index + 1} is too large to export at {dpi} DPI. Choose a lower resolution."
+            )
+
+        target = target.resolve()
+        try:
+            pix = self._doc[index].get_pixmap(dpi=dpi, alpha=transparent)
+            pix.set_dpi(dpi, dpi)
+            fd, tmp_name = tempfile.mkstemp(suffix=".img.tmp", dir=target.parent)
+            os.close(fd)
+            try:
+                pix.save(tmp_name, output=output, jpg_quality=jpeg_quality)
+                os.replace(tmp_name, target)
+            except BaseException:
+                Path(tmp_name).unlink(missing_ok=True)
+                raise
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise DocumentError(f"Could not export “{target.name}”.\n\n{exc}") from exc
+        return target
 
     # ------------------------------------------------------------------ page operations
     def delete_pages(self, indices: Iterable[int]) -> list[int]:

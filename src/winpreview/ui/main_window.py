@@ -10,6 +10,7 @@ from typing import TypeVar
 from PySide6.QtCore import QItemSelection, QItemSelectionModel, QSettings, Qt
 from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QInputDialog,
     QLabel,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QSplitter,
     QStackedWidget,
     QToolButton,
@@ -24,7 +26,14 @@ from PySide6.QtWidgets import (
 
 from winpreview import APP_NAME, __version__
 from winpreview.core import DocumentError, PasswordRequiredError, PdfDocument, scanner
-from winpreview.core.document import IMAGE_EXTENSIONS, PDF_EXTENSIONS, filter_insertable
+from winpreview.core.document import (
+    DEFAULT_EXPORT_DPI,
+    EXPORT_IMAGE_FORMATS,
+    IMAGE_EXTENSIONS,
+    PDF_EXTENSIONS,
+    filter_insertable,
+)
+from winpreview.ui.export_dialog import ExportImageDialog, ExportOptions
 from winpreview.ui.page_model import PageListModel
 from winpreview.ui.page_view import PageView
 from winpreview.ui.thumbnail_view import ThumbnailView
@@ -39,6 +48,7 @@ INSERT_FILTER = (
     + PDF_FILTER
     + ";;All files (*)"
 )
+EXPORT_FILTERS = {".png": "PNG image (*.png)", ".jpg": "JPEG image (*.jpg *.jpeg)"}
 
 
 class MainWindow(QMainWindow):
@@ -132,6 +142,13 @@ class MainWindow(QMainWindow):
             [QKeySequence(Qt.Key.Key_Delete), QKeySequence(Qt.Key.Key_Backspace)],
             "Delete the selected pages",
         )
+        self.act_export_image = self._action(
+            "&Export as Image…",
+            self.export_selected_as_images,
+            "Ctrl+Shift+E",
+            "Export the selected pages as PNG or JPEG images",
+        )
+        self.act_export_image.setIconText("Export Image")
         self.act_save = self._action("&Save", self.save, std.Save, "Save the document")
         self.act_save_as = self._action("Save &As…", self.save_as, "Ctrl+Shift+S")
         self.act_close = self._action("&Close", self.close_document, std.Close)
@@ -179,6 +196,7 @@ class MainWindow(QMainWindow):
         self.insert_menu.addAction(self.act_insert_scan)
         file_menu.addMenu(self.insert_menu)
         file_menu.addAction(self.act_delete)
+        file_menu.addAction(self.act_export_image)
         file_menu.addSeparator()
         file_menu.addAction(self.act_save)
         file_menu.addAction(self.act_save_as)
@@ -229,6 +247,7 @@ class MainWindow(QMainWindow):
         insert_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         toolbar.addWidget(insert_button)
         toolbar.addAction(self.act_delete)
+        toolbar.addAction(self.act_export_image)
 
     def _connect_signals(self) -> None:
         sel = self.thumbnails.selectionModel()
@@ -411,6 +430,38 @@ class MainWindow(QMainWindow):
             if image is not None:
                 self._apply(lambda: self._doc.insert_file(image, at))
 
+    def export_selected_as_images(self) -> None:
+        """Ask for format and resolution, then where to save, and export the selection.
+
+        One page is saved to a chosen file; several pages go to a chosen folder as
+        “<document> - Page N.png”. Exporting does not change the document.
+        """
+        if self._doc is None:
+            return
+        rows = self.selected_rows()
+        if not rows:
+            return
+        options = ExportImageDialog.get_options(
+            self, self._doc.page_size(rows[0]), len(rows), self._export_defaults()
+        )
+        if options is None:
+            return
+        targets = self._ask_export_targets(rows, options.extension)
+        if not targets:
+            return
+        self._settings.setValue("export/extension", options.extension)
+        self._settings.setValue("export/dpi", options.dpi)
+        self._settings.setValue("export/transparent", options.transparent)
+
+        done = self._export_pages(list(zip(rows, targets, strict=True)), options)
+        if done == len(rows) == 1:
+            message = f"Exported page {rows[0] + 1} to “{targets[0].name}”."
+        elif done == len(rows):
+            message = f"Exported {done} pages to “{targets[0].parent.name}”."
+        else:
+            message = f"Exported {done} of {len(rows)} pages."
+        self.statusBar().showMessage(message, 5000)
+
     def undo(self) -> None:
         if self._doc is not None and self._doc.can_undo:
             keep = self.selected_rows()[:1]
@@ -482,6 +533,87 @@ class MainWindow(QMainWindow):
                 self._error(str(exc))
                 return None
 
+    def _export_defaults(self) -> ExportOptions:
+        extension = str(self._settings.value("export/extension", ".png"))
+        try:
+            dpi = int(self._settings.value("export/dpi", DEFAULT_EXPORT_DPI))
+        except (TypeError, ValueError):
+            dpi = DEFAULT_EXPORT_DPI
+        transparent = self._settings.value("export/transparent", False, type=bool)
+        return ExportOptions(extension, dpi, bool(transparent))
+
+    def _ask_export_targets(self, rows: list[int], extension: str) -> list[Path]:
+        """The output file for each row, or [] if the user cancelled."""
+        assert self._doc is not None
+        stem = self._doc.path.stem if self._doc.path else "Untitled"
+        if len(rows) == 1:
+            suggested = Path(self._last_dir()) / f"{stem} - Page {rows[0] + 1}{extension}"
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Export as Image", str(suggested), EXPORT_FILTERS[extension]
+            )
+            if not path:
+                return []
+            target = Path(path)
+            if target.suffix.lower() not in EXPORT_IMAGE_FORMATS:
+                target = target.with_name(target.name + extension)
+            self._remember_dir(target)
+            return [target]
+
+        folder = QFileDialog.getExistingDirectory(self, "Export Pages to Folder", self._last_dir())
+        if not folder:
+            return []
+        folder = Path(folder)
+        targets = [folder / f"{stem} - Page {row + 1}{extension}" for row in rows]
+        existing = sum(1 for target in targets if target.exists())
+        if existing:
+            noun = "file already exists" if existing == 1 else "files already exist"
+            answer = QMessageBox.question(
+                self,
+                APP_NAME,
+                f"{existing} {noun} in “{folder.name}”. Do you want to replace them?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return []
+        self._settings.setValue("paths/lastDir", str(folder))
+        return targets
+
+    def _export_pages(self, jobs: list[tuple[int, Path]], options: ExportOptions) -> int:
+        """Export each (row, target); returns how many pages were written."""
+        assert self._doc is not None
+        progress: QProgressDialog | None = None
+        if len(jobs) > 1:
+            progress = QProgressDialog("Exporting pages…", "Cancel", 0, len(jobs), self)
+            progress.setWindowTitle("Export as Image")
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(500)
+        done = 0
+        error: str | None = None
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            for row, target in jobs:
+                if progress is not None:
+                    progress.setValue(done)
+                    if progress.wasCanceled():
+                        break
+                try:
+                    self._doc.export_page_image(
+                        row, target, dpi=options.dpi, transparent=options.transparent
+                    )
+                except DocumentError as exc:
+                    error = str(exc)
+                    break
+                done += 1
+        finally:
+            QApplication.restoreOverrideCursor()
+            if progress is not None:
+                progress.close()
+                progress.deleteLater()
+        if error is not None:
+            self._error(error)
+        return done
+
     def _show_thumbnail_menu(self, pos) -> None:
         menu = QMenu(self)
         menu.addAction(self.act_insert_blank)
@@ -490,6 +622,7 @@ class MainWindow(QMainWindow):
         menu.addAction(self.act_rotate_left)
         menu.addAction(self.act_rotate_right)
         menu.addSeparator()
+        menu.addAction(self.act_export_image)
         menu.addAction(self.act_delete)
         menu.exec(self.thumbnails.viewport().mapToGlobal(pos))
 
@@ -506,6 +639,7 @@ class MainWindow(QMainWindow):
         self.act_insert_blank.setEnabled(has_doc)
         self.act_insert_scan.setEnabled(has_doc and scanner.is_supported())
         self.act_delete.setEnabled(0 < selected < count)
+        self.act_export_image.setEnabled(selected > 0)
         self.act_rotate_left.setEnabled(selected > 0)
         self.act_rotate_right.setEnabled(selected > 0)
         self.act_save.setEnabled(has_doc and count > 0)
