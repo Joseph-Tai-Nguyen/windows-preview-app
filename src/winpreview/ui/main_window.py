@@ -31,8 +31,10 @@ from winpreview.core.document import (
     EXPORT_IMAGE_FORMATS,
     IMAGE_EXTENSIONS,
     PDF_EXTENSIONS,
+    OfficeExport,
     filter_insertable,
 )
+from winpreview.core.office import ExportCancelled
 from winpreview.ui.export_dialog import ExportImageDialog, ExportOptions
 from winpreview.ui.page_model import PageListModel
 from winpreview.ui.page_view import PageView
@@ -49,6 +51,11 @@ INSERT_FILTER = (
     + ";;All files (*)"
 )
 EXPORT_FILTERS = {".png": "PNG image (*.png)", ".jpg": "JPEG image (*.jpg *.jpeg)"}
+# extension -> (dialog title, file filter)
+OFFICE_EXPORTS = {
+    ".docx": ("Export as Word Document", "Word document (*.docx)"),
+    ".xlsx": ("Export as Excel Workbook", "Excel workbook (*.xlsx)"),
+}
 
 
 class MainWindow(QMainWindow):
@@ -149,6 +156,18 @@ class MainWindow(QMainWindow):
             "Export the selected pages as PNG or JPEG images",
         )
         self.act_export_image.setIconText("Export Image")
+        self.act_export_word = self._action(
+            "Export as &Word Document…",
+            lambda: self.export_selected_to_office(".docx"),
+            None,
+            "Convert the selected pages into an editable Word document (.docx)",
+        )
+        self.act_export_excel = self._action(
+            "Export as Exce&l Workbook…",
+            lambda: self.export_selected_to_office(".xlsx"),
+            None,
+            "Export the tables on the selected pages to an Excel workbook (.xlsx)",
+        )
         self.act_save = self._action("&Save", self.save, std.Save, "Save the document")
         self.act_save_as = self._action("Save &As…", self.save_as, "Ctrl+Shift+S")
         self.act_close = self._action("&Close", self.close_document, std.Close)
@@ -197,6 +216,8 @@ class MainWindow(QMainWindow):
         file_menu.addMenu(self.insert_menu)
         file_menu.addAction(self.act_delete)
         file_menu.addAction(self.act_export_image)
+        file_menu.addAction(self.act_export_word)
+        file_menu.addAction(self.act_export_excel)
         file_menu.addSeparator()
         file_menu.addAction(self.act_save)
         file_menu.addAction(self.act_save_as)
@@ -462,6 +483,72 @@ class MainWindow(QMainWindow):
             message = f"Exported {done} of {len(rows)} pages."
         self.statusBar().showMessage(message, 5000)
 
+    def export_selected_to_office(self, extension: str) -> None:
+        """Ask where to save, then convert the selection to Word (.docx) or Excel (.xlsx).
+
+        Converting can take a few seconds per page, so a cancellable progress dialog
+        appears for longer runs. Exporting does not change the document.
+        """
+        if self._doc is None:
+            return
+        rows = self.selected_rows()
+        if not rows:
+            return
+        title, file_filter = OFFICE_EXPORTS[extension]
+        stem = self._doc.path.stem if self._doc.path else "Untitled"
+        if len(rows) == 1 and self._doc.page_count > 1:
+            stem += f" - Page {rows[0] + 1}"
+        suggested = Path(self._last_dir()) / f"{stem}{extension}"
+        path, _ = QFileDialog.getSaveFileName(self, title, str(suggested), file_filter)
+        if not path:
+            return
+        target = Path(path)
+        if target.suffix.lower() != extension:
+            target = target.with_name(target.name + extension)
+        self._remember_dir(target)
+
+        export = self._doc.export_word if extension == ".docx" else self._doc.export_excel
+        progress = QProgressDialog("Converting pages…", "Cancel", 0, len(rows) + 1, self)
+        progress.setWindowTitle(title)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(500)
+
+        def report(done: int, total: int) -> bool:
+            progress.setMaximum(total)
+            progress.setValue(done)
+            return not progress.wasCanceled()
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            result = export(rows, target, progress=report)
+        except ExportCancelled:
+            self.statusBar().showMessage("Export cancelled.", 5000)
+            return
+        except DocumentError as exc:
+            self._error(str(exc), title=title)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            progress.close()
+            progress.deleteLater()
+        self.statusBar().showMessage(self._office_export_message(result), 5000)
+        if result.failed:
+            pages = ", ".join(str(row + 1) for row in result.failed)
+            if len(result.failed) == 1:
+                message = f"Page {pages} could not be converted and was left out"
+            else:
+                message = f"Pages {pages} could not be converted and were left out"
+            self._error(f"{message} of “{result.path.name}”.", title=title)
+
+    @staticmethod
+    def _office_export_message(result: OfficeExport) -> str:
+        pages = len(result.pages)
+        page_text = "1 page" if pages == 1 else f"{pages} pages"
+        if result.path.suffix.lower() == ".xlsx":
+            tables = "1 table" if result.tables == 1 else f"{result.tables} tables"
+            return f"Exported {tables} from {page_text} to “{result.path.name}”."
+        return f"Exported {page_text} to “{result.path.name}”."
+
     def undo(self) -> None:
         if self._doc is not None and self._doc.can_undo:
             keep = self.selected_rows()[:1]
@@ -623,6 +710,8 @@ class MainWindow(QMainWindow):
         menu.addAction(self.act_rotate_right)
         menu.addSeparator()
         menu.addAction(self.act_export_image)
+        menu.addAction(self.act_export_word)
+        menu.addAction(self.act_export_excel)
         menu.addAction(self.act_delete)
         menu.exec(self.thumbnails.viewport().mapToGlobal(pos))
 
@@ -640,6 +729,8 @@ class MainWindow(QMainWindow):
         self.act_insert_scan.setEnabled(has_doc and scanner.is_supported())
         self.act_delete.setEnabled(0 < selected < count)
         self.act_export_image.setEnabled(selected > 0)
+        self.act_export_word.setEnabled(selected > 0)
+        self.act_export_excel.setEnabled(selected > 0)
         self.act_rotate_left.setEnabled(selected > 0)
         self.act_rotate_right.setEnabled(selected > 0)
         self.act_save.setEnabled(has_doc and count > 0)

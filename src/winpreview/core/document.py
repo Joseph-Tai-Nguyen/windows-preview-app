@@ -18,11 +18,13 @@ from __future__ import annotations
 import itertools
 import os
 import tempfile
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pymupdf
+
+from winpreview.core import office
 
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif"})
 PDF_EXTENSIONS = frozenset({".pdf"})
@@ -64,6 +66,16 @@ class RenderedPage:
     height: int
     stride: int
     samples: bytes
+
+
+@dataclass(frozen=True)
+class OfficeExport:
+    """What ``export_word`` / ``export_excel`` wrote. Page indices are 0-based."""
+
+    path: Path
+    pages: list[int]  # pages that ended up in the file
+    failed: list[int] = field(default_factory=list)  # pages the converter could not handle
+    tables: int = 0  # Excel only
 
 
 @dataclass(frozen=True)
@@ -243,6 +255,61 @@ class PdfDocument:
             raise DocumentError(f"Could not export “{target.name}”.\n\n{exc}") from exc
         return target
 
+    def export_word(
+        self,
+        indices: Iterable[int],
+        path: str | os.PathLike[str],
+        *,
+        progress: office.ProgressCallback | None = None,
+    ) -> OfficeExport:
+        """Convert the pages at ``indices`` (in document order) into an editable Word file.
+
+        Text becomes paragraphs and tables where the layout allows it; scanned pages
+        become pictures. ``progress`` is called with (done, total) and may return
+        False to cancel, which raises ``office.ExportCancelled`` and writes nothing.
+        The document is not changed.
+        """
+        rows, target = self._office_target(indices, path, ".docx")
+        pdf_bytes = self._copy_pages(rows).tobytes()
+        result = self._write_office_file(
+            target,
+            lambda tmp: office.write_docx(pdf_bytes, tmp, progress),
+            "None of the selected pages could be converted to Word.",
+        )
+        return OfficeExport(
+            target, [rows[i] for i in result.converted], [rows[i] for i in result.failed]
+        )
+
+    def export_excel(
+        self,
+        indices: Iterable[int],
+        path: str | os.PathLike[str],
+        *,
+        progress: office.ProgressCallback | None = None,
+    ) -> OfficeExport:
+        """Write each table on the pages at ``indices`` to its own sheet of an Excel file.
+
+        Pages without tables are skipped; if no table is found at all, nothing is
+        written and ``DocumentError`` is raised. Numbers become real numbers so they can
+        be calculated with. ``progress`` works as in ``export_word``.
+        """
+        rows, target = self._office_target(indices, path, ".xlsx")
+        copy = self._copy_pages(rows)
+        numbers = [row + 1 for row in rows]
+        result = self._write_office_file(
+            target,
+            lambda tmp: office.write_xlsx(copy, numbers, tmp, progress),
+            "No tables were found on the selected pages. Scanned pages contain only "
+            "pictures, so their tables cannot be read. Try File › Export as Word "
+            "Document instead.",
+        )
+        return OfficeExport(
+            target,
+            [rows[i] for i in result.converted],
+            [rows[i] for i in result.failed],
+            result.tables,
+        )
+
     # ------------------------------------------------------------------ page operations
     def delete_pages(self, indices: Iterable[int]) -> list[int]:
         rows = self._normalize(indices)
@@ -351,6 +418,64 @@ class PdfDocument:
             if not 0 <= row < self.page_count:
                 raise IndexError(f"Page index {row} out of range (0..{self.page_count - 1}).")
         return rows
+
+    def _office_target(
+        self, indices: Iterable[int], path: str | os.PathLike[str], suffix: str
+    ) -> tuple[list[int], Path]:
+        rows = self._normalize(indices)
+        target = Path(path)
+        if target.suffix.lower() != suffix:
+            raise DocumentError(f"“{target.name}” must end in {suffix}.")
+        if not rows:
+            raise DocumentError("Select at least one page to export.")
+        return rows, target.resolve()
+
+    def _copy_pages(self, rows: Sequence[int]) -> pymupdf.Document:
+        """A new, unencrypted document holding ``rows`` of this one, as they look.
+
+        Rotation is baked into the page content, because the converters read text in
+        unrotated page space: a landscape page stored as sideways content plus a
+        rotation would otherwise lose its text (Word) or tables (Excel).
+        """
+        copy = pymupdf.open()
+        for row in rows:
+            copy.insert_pdf(self._doc, from_page=row, to_page=row)
+            if copy[-1].rotation:
+                copy[-1].remove_rotation()
+        return copy
+
+    @staticmethod
+    def _write_office_file(
+        target: Path,
+        write: Callable[[str], office.ConversionResult],
+        nothing_message: str,
+    ) -> office.ConversionResult:
+        """Run ``write`` on a temp file next to ``target``, then move it into place."""
+        tmp_name: str | None = None
+        try:
+            fd, tmp_name = tempfile.mkstemp(suffix=f".tmp{target.suffix}", dir=target.parent)
+            os.close(fd)
+            result = write(tmp_name)
+            os.replace(tmp_name, target)
+            return result
+        except office.ExportCancelled:
+            raise
+        except office.NothingToExport:
+            raise DocumentError(nothing_message) from None
+        except ImportError as exc:
+            raise DocumentError(
+                f"This export needs a component that is not installed.\n\n{exc}"
+            ) from exc
+        except PermissionError as exc:
+            raise DocumentError(
+                f"Could not write “{target.name}”. If it is open in another program, "
+                f"close it and try again.\n\n{exc}"
+            ) from exc
+        except Exception as exc:  # third-party converters raise all kinds of errors
+            raise DocumentError(f"Could not export “{target.name}”.\n\n{exc}") from exc
+        finally:
+            if tmp_name is not None:
+                Path(tmp_name).unlink(missing_ok=True)
 
     def _neighbour_size(self, at: int) -> tuple[float, float]:
         if self.page_count == 0:

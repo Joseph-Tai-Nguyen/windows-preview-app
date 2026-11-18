@@ -64,6 +64,58 @@ def make_pdf(tmp_path: Path) -> MakePdf:
     return _make
 
 
+Table = Sequence[Sequence[str]]
+
+
+@pytest.fixture
+def make_table_pdf(tmp_path: Path) -> Callable[..., Path]:
+    """Create a PDF with one entry of ``pages`` per page.
+
+    An entry is either a string (a page of plain paragraph text) or a list of tables,
+    each a list of rows of cell text. Tables are drawn with grid lines unless
+    ``ruled=False``, and stacked down the page with a gap between them.
+    """
+
+    def _make(
+        pages: Sequence[str | Sequence[Table]], name: str = "tables.pdf", ruled: bool = True
+    ) -> Path:
+        doc = pymupdf.open()
+        for entry in pages:
+            page = doc.new_page(width=612, height=792)
+            if isinstance(entry, str):
+                page.insert_textbox(pymupdf.Rect(72, 72, 540, 720), entry, fontsize=11)
+                continue
+            top = 72.0
+            for table in entry:
+                for r, row in enumerate(table):
+                    for c, text in enumerate(row):
+                        cell = pymupdf.Rect(
+                            72 + c * 110, top + r * 22, 182 + c * 110, top + (r + 1) * 22
+                        )
+                        if ruled:
+                            page.draw_rect(cell, color=(0, 0, 0), width=0.8)
+                        page.insert_text((cell.x0 + 4, cell.y1 - 6), text, fontsize=10)
+                top += len(table) * 22 + 60
+        path = tmp_path / name
+        doc.save(path)
+        doc.close()
+        return path
+
+    return _make
+
+
+def docx_text(path: Path) -> str:
+    """All text of a Word file: paragraphs, then table cells, one per line."""
+    import docx
+
+    document = docx.Document(str(path))
+    lines = [p.text for p in document.paragraphs if p.text]
+    for table in document.tables:
+        for row in table.rows:
+            lines.extend(cell.text for cell in row.cells if cell.text)
+    return "\n".join(lines)
+
+
 @pytest.fixture
 def make_png(tmp_path: Path) -> Callable[..., Path]:
     def _make(name: str = "image.png", width: int = 200, height: int = 100) -> Path:

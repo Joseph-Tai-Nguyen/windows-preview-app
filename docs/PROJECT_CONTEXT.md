@@ -15,13 +15,15 @@ The goal is a familiar *workflow*, not a clone of Preview's look. Names, icons a
 | Language | Python 3.11+ (developed on 3.14) | Fast to iterate, good PDF libraries, easy for agents to work in. |
 | GUI | PySide6 (Qt 6, LGPL) | Native-feeling Windows widgets, high-DPI support, solid drag and drop, a mature model/view framework. |
 | PDF engine | PyMuPDF (`import pymupdf`, MuPDF, AGPL) | Fast rendering plus page delete, reorder (`select`), insert and rotate in one library. Converts images to PDF pages. |
+| Word export | pdf2docx (MIT), with python-docx (MIT), fonttools (MIT), OpenCV headless (Apache-2.0), numpy (BSD) and fire (Apache-2.0) | Rebuilds paragraphs, tables and images from the PDF layout on top of PyMuPDF, fully offline. Imported only when exporting. |
+| Excel export | openpyxl (MIT, with et-xmlfile, MIT) + PyMuPDF `Page.find_tables()` | PyMuPDF already detects tables. openpyxl writes the `.xlsx` with real numbers and formats. |
 | Scanning | WIA Automation through pywin32 (`WIA.CommonDialog`) | Built into Windows, works with any WIA scanner or MFP, and provides the standard scan dialog. No SDK needed. |
 | Tests | pytest + pytest-qt, Qt offscreen platform | Headless UI tests that work in CI. |
 | Lint / format | ruff | One fast tool for both. |
 | Packaging | PyInstaller (`scripts/build.ps1`) | Self-contained folder build for Windows, with the icon and version info embedded in the exe. |
-| Installer | Inno Setup 6 (`installer/winpreview.iss`, `scripts/build_installer.ps1`) | A single offline `setup.exe` (about 80 MB, LZMA2). Per-user install without admin rights, an optional all-users install, desktop and Start-menu shortcuts, an optional "Open with" entry for PDFs, and a clean uninstall. Inno Setup is a build-time tool only; it is not shipped with the app. |
+| Installer | Inno Setup 6 (`installer/winpreview.iss`, `scripts/build_installer.ps1`) | A single offline `setup.exe` (about 115 MB, LZMA2; OpenCV for Word export is the largest addition, and `build.ps1` drops its unused 40 MB FFmpeg DLL). Per-user install without admin rights, an optional all-users install, desktop and Start-menu shortcuts, an optional "Open with" entry for PDFs, and a clean uninstall. Inno Setup is a build-time tool only; it is not shipped with the app. |
 
-**License note:** the repository is GPL-3.0. PyMuPDF is AGPL-3.0, and GPLv3 code may be combined with it. A future closed-source or permissive release would need a commercial MuPDF license, or a switch to `pypdfium2` (rendering) plus `pypdf` (page operations).
+**License note:** the repository is GPL-3.0. PyMuPDF is AGPL-3.0, and GPLv3 code may be combined with it. The Office-export libraries (pdf2docx, openpyxl and their dependencies) are MIT, BSD or Apache-2.0, all compatible with GPLv3. A future closed-source or permissive release would need a commercial MuPDF license, or a switch to `pypdfium2` (rendering) plus `pypdf` (page operations).
 
 ## Architecture
 
@@ -36,6 +38,7 @@ The goal is a familiar *workflow*, not a clone of Preview's look. Names, icons a
                                 │ calls / returns rows to select
 ┌───────────────────────── core (no Qt) ────────────────────────────┐
 │ PdfDocument ── open/save, delete/move/insert/rotate, undo/redo    │
+│ office      ── pages → Word (.docx) / tables → Excel (.xlsx)      │
 │ scanner     ── WIA acquire → image file                           │
 └───────────────────────────────┬───────────────────────────────────┘
                                 │
@@ -92,12 +95,25 @@ docs/                  Requirements, this file
 scripts/               setup / run / check / build PowerShell helpers
 ```
 
+## Exporting to Word and Excel
+
+`PdfDocument.export_word` / `export_excel` validate the input, copy the selected pages into a scratch document, and hand that to `core/office.py`. The result is written to a temp file next to the target and moved into place with `os.replace`, like `save()`. Decisions worth knowing:
+
+- **The copy has its rotation baked in** (`Page.remove_rotation()`). Both converters read unrotated page space, so a landscape page stored as sideways content plus `/Rotate 90` would otherwise lose its text (pdf2docx skips vertical text) or its tables. Copying also strips encryption, and it means later edits can't affect an export that is still running.
+- **pdf2docx is driven step by step** (`load_pages`, `parse_document`, then `page.parse` per page, then `make_docx`) instead of `convert()`, so the UI gets per-page progress and can cancel, and so pages that fail are reported instead of only logged. Multiprocessing stays off because it breaks in a frozen exe.
+- **pdf2docx calls `logging.basicConfig` on import** and logs every step to the root logger. `_quiet_root_logger()` puts a temporary `NullHandler` on the root logger for the duration and restores it afterwards. It also imports the legacy `fitz` alias. That deprecation warning is silenced at import; our own code still uses `pymupdf`.
+- **Cell text is read from the cell rectangles** (`page.get_textbox(cell)`), not `Table.extract()`. With PyMuPDF 2.x, `extract()` can split “1,200” into “1200” and “,” on separate lines.
+- **Table detection** tries `strategy="lines"` (ruled tables) first and falls back to `strategy="text"` only for pages without ruled tables, because the text strategy finds borderless tables but leaves ordinary prose alone.
+- **Numbers become numbers** only when nothing is lost: leading-zero codes, values over 15 digits, and ambiguous formats such as “1.234,56” stay text. The first row of each sheet is treated as the header and is never converted.
+
 ## Known limitations
 
 - **Rendering happens on the GUI thread** inside the delegates' `paint`. That is fine for typical documents, but very heavy pages can stutter while scrolling. Next step: render in a `QThreadPool` and show placeholders (VIEW-7).
 - **Saving an encrypted PDF writes it without encryption** (DOC-10).
 - **Scanning gets one page per dialog.** Feeder (ADF) batches need the lower-level WIA `Item.Transfer` loop (PAGE-10).
 - **Undo memory** grows with document size times history depth.
+- **Office export is layout reconstruction, not a perfect round trip.** Complex layouts (multi-column text, text boxes, forms) can come out shifted in Word. Excel only gets tables: a ruled cell holding several lines of text may be split into one row per line (PyMuPDF behavior), and very small borderless tables (for example three rows of two columns) aren't recognized. Scanned pages contain no text, so Word gets a picture of them and Excel finds no tables. OCR (Tesseract) would fix that, but it is a separate install.
+- **Office export runs on the GUI thread.** The progress dialog keeps the window responsive between pages, but one very complex page can freeze the window for a few seconds.
 - `Document.select()` (used for reordering) rebuilds the page tree. Outline (bookmark) entries that point to deleted pages are dropped. That is acceptable for this tool.
 
 ## Roadmap (suggested order)

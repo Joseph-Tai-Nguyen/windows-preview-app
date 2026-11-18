@@ -48,4 +48,8 @@ VSVersionInfo(
     src\winpreview\__main__.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
 
+# OpenCV (needed by pdf2docx for Word export) ships a 40 MB FFmpeg DLL that it only
+# loads for video I/O, which the app never does.
+Remove-Item "dist\WinPreview\_internal\cv2\opencv_videoio_ffmpeg*.dll" -ErrorAction SilentlyContinue
+
 Write-Host "Built dist\WinPreview\WinPreview.exe (v$version)" -ForegroundColor Green

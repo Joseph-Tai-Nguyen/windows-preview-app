@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
+import os
+
 import pymupdf
 import pytest
 
-from tests.conftest import page_labels
-from winpreview.core import DocumentError, PasswordRequiredError, PdfDocument
+from tests.conftest import docx_text, page_labels
+from winpreview.core import DocumentError, PasswordRequiredError, PdfDocument, office
 
 
 # ---------------------------------------------------------------- opening
@@ -351,3 +354,232 @@ def test_export_page_image_transparent_requires_png(make_pdf, tmp_path):
     with pytest.raises(DocumentError, match="PNG"):
         doc.export_page_image(0, tmp_path / "page.jpg", transparent=True)
     assert not (tmp_path / "page.jpg").exists()
+
+
+# ---------------------------------------------------------------- export to Word / Excel
+SALES = [["Region", "Q1", "Share"], ["North", "1,200", "12.5%"], ["South", "-80", "7%"]]
+PARTS = [["Part", "Qty"], ["Bolt", "1,500"], ["Nut", "20"]]
+
+
+def landscape_sideways_pdf(path):
+    """A landscape page stored the way some generators do it: a portrait page whose
+    content is drawn sideways, with /Rotate 90 to show it upright."""
+    source = pymupdf.open()
+    landscape = source.new_page(width=792, height=612)
+    for r, row in enumerate(PARTS):
+        for c, text in enumerate(row):
+            cell = pymupdf.Rect(72 + c * 120, 72 + r * 22, 192 + c * 120, 94 + r * 22)
+            landscape.draw_rect(cell, width=0.8)
+            landscape.insert_text((cell.x0 + 4, cell.y1 - 6), text, fontsize=10)
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    page.show_pdf_page(page.rect, source, 0, rotate=90)
+    page.set_rotation(90)
+    doc.save(path)
+    return path
+
+
+def test_export_word_converts_selected_pages_in_order(make_pdf, tmp_path):
+    doc = PdfDocument.open(make_pdf(4))
+    result = doc.export_word([3, 1], tmp_path / "out.docx")
+
+    assert result.path == (tmp_path / "out.docx").resolve()
+    assert result.pages == [1, 3]
+    assert result.failed == []
+    text = docx_text(result.path)
+    assert "P2" in text and "P4" in text
+    assert "P1" not in text and "P3" not in text
+    assert text.index("P2") < text.index("P4")
+    assert not doc.is_modified
+    assert not doc.can_undo
+
+
+def test_export_word_keeps_tables(make_table_pdf, tmp_path):
+    import docx
+
+    doc = PdfDocument.open(make_table_pdf([[SALES]]))
+    target = doc.export_word([0], tmp_path / "table.docx").path
+    tables = docx.Document(str(target)).tables
+    assert len(tables) == 1
+    assert [[cell.text for cell in row.cells] for row in tables[0].rows] == SALES
+
+
+def test_export_word_from_encrypted_document(make_pdf, tmp_path):
+    doc = PdfDocument.open(make_pdf(2, password="secret"), "secret")
+    target = doc.export_word([0, 1], tmp_path / "out.docx").path
+    assert "P1" in docx_text(target)
+
+
+def test_export_word_reads_rotated_landscape_page(tmp_path):
+    doc = PdfDocument.open(landscape_sideways_pdf(tmp_path / "landscape.pdf"))
+    text = docx_text(doc.export_word([0], tmp_path / "out.docx").path)
+    assert "Bolt" in text and "1,500" in text
+
+
+def test_export_word_reports_progress_and_replaces_file(make_pdf, tmp_path):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    target = out_dir / "out.docx"
+    target.write_bytes(b"old")
+    calls = []
+    doc = PdfDocument.open(make_pdf(2))
+    doc.export_word([0, 1], target, progress=lambda done, total: calls.append((done, total)))
+
+    assert calls[0] == (0, 3)
+    assert calls[-1] == (3, 3)
+    assert target.read_bytes()[:2] == b"PK"  # a .docx is a zip file
+    assert [p.name for p in out_dir.iterdir()] == ["out.docx"]
+
+
+def test_export_word_cancel_writes_nothing(make_pdf, tmp_path):
+    target = tmp_path / "out.docx"
+    target.write_bytes(b"old")
+    doc = PdfDocument.open(make_pdf(2))
+    with pytest.raises(office.ExportCancelled):
+        doc.export_word([0, 1], target, progress=lambda done, total: done < 1)
+    assert target.read_bytes() == b"old"
+    assert list(tmp_path.glob("*.docx")) == [target]
+
+
+def test_export_word_leaves_out_pages_that_fail(make_pdf, tmp_path, monkeypatch):
+    from pdf2docx.page.Page import Page
+
+    original = Page.parse
+
+    def parse(self, **kwargs):
+        if self.id == 1:
+            raise RuntimeError("broken page")
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(Page, "parse", parse)
+    doc = PdfDocument.open(make_pdf(3))
+    result = doc.export_word([0, 1, 2], tmp_path / "out.docx")
+    assert result.pages == [0, 2]
+    assert result.failed == [1]
+    assert "P2" not in docx_text(result.path)
+
+
+def test_export_word_fails_if_no_page_converts(make_pdf, tmp_path, monkeypatch):
+    from pdf2docx.page.Page import Page
+
+    def parse(self, **kwargs):
+        raise RuntimeError("broken page")
+
+    monkeypatch.setattr(Page, "parse", parse)
+    doc = PdfDocument.open(make_pdf(1))
+    with pytest.raises(DocumentError, match="None of the selected pages"):
+        doc.export_word([0], tmp_path / "out.docx")
+    assert list(tmp_path.glob("*.docx")) == []
+
+
+def test_export_word_does_not_leak_logging(make_pdf, tmp_path):
+    root = logging.getLogger()
+    before = (root.handlers[:], root.level)
+    PdfDocument.open(make_pdf(1)).export_word([0], tmp_path / "out.docx")
+    assert (root.handlers, root.level) == before
+
+
+def test_export_excel_writes_one_sheet_per_table(make_table_pdf, tmp_path):
+    import openpyxl
+
+    path = make_table_pdf([[SALES], "Just a paragraph of prose. " * 20, [SALES, PARTS]])
+    doc = PdfDocument.open(path)
+    result = doc.export_excel([0, 1, 2], tmp_path / "out.xlsx")
+
+    assert (result.pages, result.tables, result.failed) == ([0, 2], 3, [])
+    book = openpyxl.load_workbook(result.path)
+    assert book.sheetnames == ["Page 1", "Page 3 (1)", "Page 3 (2)"]
+    sheet = book["Page 1"]
+    values = [[cell.value for cell in row] for row in sheet.iter_rows()]
+    assert values == [["Region", "Q1", "Share"], ["North", 1200, 0.125], ["South", -80, 0.07]]
+    assert sheet["B2"].number_format == "#,##0"
+    assert sheet["C2"].number_format == "0.0%"
+    assert sheet["A1"].font.bold
+    assert sheet.freeze_panes == "A2"
+    assert [[c.value for c in row] for row in book["Page 3 (2)"].iter_rows()][1] == ["Bolt", 1500]
+    assert not doc.is_modified
+
+
+def test_export_excel_names_sheets_by_document_page(make_table_pdf, tmp_path):
+    import openpyxl
+
+    doc = PdfDocument.open(make_table_pdf([[SALES], [PARTS]]))
+    result = doc.export_excel([1], tmp_path / "out.xlsx")
+    assert result.pages == [1]
+    assert openpyxl.load_workbook(result.path).sheetnames == ["Page 2"]
+
+
+def test_export_excel_finds_borderless_tables(make_table_pdf, tmp_path):
+    import openpyxl
+
+    # Without grid lines a table is recognised by its aligned columns, which needs a
+    # few rows: PyMuPDF does not treat three rows of two words as a table.
+    table = [*PARTS, ["Washer", "7"]]
+    doc = PdfDocument.open(make_table_pdf([[table]], ruled=False))
+    book = openpyxl.load_workbook(doc.export_excel([0], tmp_path / "out.xlsx").path)
+    values = [[cell.value for cell in row] for row in book.active.iter_rows()]
+    assert values == [["Part", "Qty"], ["Bolt", 1500], ["Nut", 20], ["Washer", 7]]
+
+
+def test_export_excel_reads_rotated_landscape_page(tmp_path):
+    import openpyxl
+
+    doc = PdfDocument.open(landscape_sideways_pdf(tmp_path / "landscape.pdf"))
+    book = openpyxl.load_workbook(doc.export_excel([0], tmp_path / "out.xlsx").path)
+    assert [cell.value for cell in next(book.active.iter_rows())] == ["Part", "Qty"]
+
+
+def test_export_excel_without_tables_writes_nothing(make_pdf, tmp_path):
+    target = tmp_path / "out.xlsx"
+    target.write_bytes(b"old")
+    doc = PdfDocument.open(make_pdf(2))
+    with pytest.raises(DocumentError, match="No tables were found"):
+        doc.export_excel([0, 1], target)
+    assert target.read_bytes() == b"old"
+    assert list(tmp_path.glob("*.xlsx")) == [target]
+
+
+def test_export_excel_cancel_writes_nothing(make_table_pdf, tmp_path):
+    doc = PdfDocument.open(make_table_pdf([[SALES], [PARTS]]))
+    with pytest.raises(office.ExportCancelled):
+        doc.export_excel([0, 1], tmp_path / "out.xlsx", progress=lambda done, total: False)
+    assert list(tmp_path.glob("*.xlsx")) == []
+
+
+@pytest.mark.parametrize("method", ["export_word", "export_excel"])
+@pytest.mark.parametrize(
+    ("name", "rows"), [("out.pdf", [0]), ("out", [0]), ("out.doc", [0]), (None, [])]
+)
+def test_export_office_rejects_bad_input(make_pdf, tmp_path, method, name, rows):
+    doc = PdfDocument.open(make_pdf(1))
+    suffix = ".docx" if method == "export_word" else ".xlsx"
+    with pytest.raises(DocumentError):
+        getattr(doc, method)(rows, tmp_path / (name or f"out{suffix}"))
+    assert list(tmp_path.glob("out*")) == []
+
+
+@pytest.mark.parametrize("method", ["export_word", "export_excel"])
+def test_export_office_rejects_bad_index(make_pdf, tmp_path, method):
+    doc = PdfDocument.open(make_pdf(1))
+    suffix = ".docx" if method == "export_word" else ".xlsx"
+    with pytest.raises(IndexError):
+        getattr(doc, method)([1], tmp_path / f"out{suffix}")
+
+
+def test_export_office_missing_folder(make_table_pdf, tmp_path):
+    doc = PdfDocument.open(make_table_pdf([[SALES]]))
+    with pytest.raises(DocumentError, match=r"out.docx"):
+        doc.export_word([0], tmp_path / "missing" / "out.docx")
+    with pytest.raises(DocumentError, match=r"out.xlsx"):
+        doc.export_excel([0], tmp_path / "missing" / "out.xlsx")
+
+
+def test_export_office_explains_a_locked_file(make_table_pdf, tmp_path, monkeypatch):
+    def replace(src, dst):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(os, "replace", replace)
+    doc = PdfDocument.open(make_table_pdf([[SALES]]))
+    with pytest.raises(DocumentError, match="close it and try again"):
+        doc.export_excel([0], tmp_path / "out.xlsx")
+    assert list(tmp_path.glob("*.xlsx")) == []

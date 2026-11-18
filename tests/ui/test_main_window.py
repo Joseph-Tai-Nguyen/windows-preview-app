@@ -5,9 +5,9 @@ from pathlib import Path
 import pymupdf
 import pytest
 from PySide6.QtCore import QPoint, QSettings, Qt
-from PySide6.QtWidgets import QFileDialog, QMessageBox
+from PySide6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
 
-from tests.conftest import page_labels
+from tests.conftest import docx_text, page_labels
 from winpreview.ui.export_dialog import ExportImageDialog, ExportOptions
 from winpreview.ui.main_window import MainWindow
 
@@ -292,3 +292,117 @@ def test_export_dialog_transparent_only_for_png(qtbot):
 
     dialog.format_box.setCurrentIndex(dialog.format_box.findData(".png"))
     assert dialog.options().transparent  # the tick survives a round trip through JPEG
+
+
+# ---------------------------------------------------------------- export to Word / Excel
+TABLE = [["Item", "Qty"], ["Bolt", "1,500"], ["Nut", "20"]]
+
+
+@pytest.fixture
+def save_dialog(monkeypatch):
+    """Answer the save dialog without showing it; records what was asked."""
+    calls = {"save": None, "asked": []}
+
+    def get_save(parent, caption, suggested, filters):
+        calls["asked"].append((caption, Path(suggested).name, filters))
+        return (str(calls["save"]) if calls["save"] else "", "")
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", get_save)
+    return calls
+
+
+def test_office_export_actions_placement_and_enabled_state(window, make_pdf):
+    actions = window.menuBar().actions()[0].menu().actions()
+    at = actions.index(window.act_export_image)
+    assert actions[at + 1 : at + 3] == [window.act_export_word, window.act_export_excel]
+    assert not window.act_export_word.isEnabled()
+    assert not window.act_export_excel.isEnabled()
+    window.open_file(make_pdf(2))
+    assert window.act_export_word.isEnabled()
+    assert window.act_export_excel.isEnabled()
+    window.thumbnails.clearSelection()
+    assert not window.act_export_word.isEnabled()
+    assert not window.act_export_excel.isEnabled()
+
+
+def test_export_word_document(window, make_pdf, save_dialog, tmp_path):
+    window.open_file(make_pdf(3))
+    select(window, [0, 2])
+    save_dialog["save"] = tmp_path / "notes"  # the extension is added
+
+    window.act_export_word.trigger()
+
+    target = tmp_path / "notes.docx"
+    text = docx_text(target)
+    assert "P1" in text and "P3" in text and "P2" not in text
+    assert save_dialog["asked"] == [
+        ("Export as Word Document", "doc.docx", "Word document (*.docx)")
+    ]
+    assert window.statusBar().currentMessage() == "Exported 2 pages to “notes.docx”."
+    assert not window.isWindowModified()
+    assert not window.errors
+
+
+def test_export_excel_workbook(window, make_table_pdf, save_dialog, tmp_path):
+    import openpyxl
+
+    window.open_file(make_table_pdf([[TABLE], "Only prose here. " * 20]))
+    select(window, [0])
+    save_dialog["save"] = tmp_path / "parts.xlsx"
+
+    window.act_export_excel.trigger()
+
+    book = openpyxl.load_workbook(tmp_path / "parts.xlsx")
+    assert book.sheetnames == ["Page 1"]
+    assert [[c.value for c in row] for row in book.active.iter_rows()][1] == ["Bolt", 1500]
+    assert save_dialog["asked"][0][1:] == ("tables - Page 1.xlsx", "Excel workbook (*.xlsx)")
+    message = "Exported 1 table from 1 page to “parts.xlsx”."
+    assert window.statusBar().currentMessage() == message
+
+
+def test_export_excel_without_tables_shows_error(window, make_pdf, save_dialog, tmp_path):
+    window.open_file(make_pdf(1))
+    save_dialog["save"] = tmp_path / "out.xlsx"
+    window.act_export_excel.trigger()
+    assert window.errors and "No tables were found" in window.errors[0]
+    assert not (tmp_path / "out.xlsx").exists()
+
+
+def test_export_office_cancelled_in_save_dialog(window, make_pdf, save_dialog, tmp_path):
+    window.open_file(make_pdf(1))
+    window.act_export_word.trigger()
+    assert len(save_dialog["asked"]) == 1
+    assert list(tmp_path.glob("*.docx")) == []
+    assert not window.errors
+
+
+def test_export_office_cancelled_during_conversion(
+    window, make_pdf, save_dialog, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(QProgressDialog, "wasCanceled", lambda self: True)
+    window.open_file(make_pdf(2))
+    window.select_all()
+    save_dialog["save"] = tmp_path / "out.docx"
+    window.act_export_word.trigger()
+    assert not (tmp_path / "out.docx").exists()
+    assert window.statusBar().currentMessage() == "Export cancelled."
+    assert not window.errors
+
+
+def test_export_word_reports_left_out_pages(window, make_pdf, save_dialog, tmp_path, monkeypatch):
+    from pdf2docx.page.Page import Page
+
+    original = Page.parse
+
+    def parse(self, **kwargs):
+        if self.id == 1:
+            raise RuntimeError("broken page")
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(Page, "parse", parse)
+    window.open_file(make_pdf(3))
+    window.select_all()
+    save_dialog["save"] = tmp_path / "out.docx"
+    window.act_export_word.trigger()
+    assert (tmp_path / "out.docx").exists()
+    assert window.errors == ["Page 2 could not be converted and was left out of “out.docx”."]

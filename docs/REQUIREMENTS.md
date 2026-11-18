@@ -69,6 +69,8 @@ All operations act on the thumbnail selection, can be undone, and leave the affe
 | PAGE-12 | Export the selected pages to a new PDF. | Could | ⬜ |
 | PAGE-13 | Crop pages. | Could | ⬜ |
 | PAGE-14 | **File › Export as Image…** (Ctrl+Shift+E) saves the selected pages as PNG or JPEG at 72–600 DPI (default 300), optionally with a transparent background (PNG only). One page goes to a chosen file; several go to a folder as “<name> - Page N.png”. | Could | ✅ |
+| PAGE-15 | **File › Export as Word Document…** converts the selected pages into one editable `.docx` (pdf2docx): text becomes paragraphs, ruled tables become Word tables, scanned pages become pictures. Rotated pages are converted as displayed. Pages the converter fails on are left out and named in a warning. A cancellable progress dialog appears for longer runs. | Could | ✅ |
+| PAGE-16 | **File › Export as Excel Workbook…** writes every table found on the selected pages to its own sheet (“Page N”, or “Page N (2)” for a second table) of one `.xlsx`. Ruled tables are found first, then borderless tables from aligned columns. Numbers such as “1,200”, “-80” and “12.5%” become real numbers; codes like “007” stay text. The first row is bold and frozen. If no table is found, nothing is written and the user is told why. | Could | ✅ |
 
 When nothing is selected, inserts go after the page currently in view. In an empty document they go at the start.
 

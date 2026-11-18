@@ -11,6 +11,9 @@ Open a PDF, see every page as a thumbnail, and fix the document directly:
   - **Blank Page**: the same size as the selected page
   - **Page from Scanner…**: through the standard Windows scan dialog (WIA)
 - **Export pages as images**: **File › Export as Image…** saves the selected pages as sharp PNG or JPEG files at up to 600 DPI, optionally as PNG with a transparent background.
+- **Export to Microsoft Office**:
+  - **File › Export as Word Document…** turns the selected pages into an editable `.docx`, keeping paragraphs, tables and pictures.
+  - **File › Export as Excel Workbook…** puts each table on the selected pages into its own sheet of an `.xlsx`, with numbers you can calculate with.
 - **Drop files** from Explorer onto the sidebar to insert them exactly where you drop them.
 - **Rotate** pages, **undo/redo** everything, and **save** safely (the original is replaced atomically, never half-written).
 
@@ -92,6 +95,7 @@ windows-preview-app/
 │   ├── __main__.py            # python -m winpreview
 │   ├── core/                  # Qt-free logic, fully unit tested
 │   │   ├── document.py        #   PdfDocument: open/save, delete/move/insert/rotate, export, undo
+│   │   ├── office.py          #   Word (.docx) and Excel (.xlsx) conversion
 │   │   └── scanner.py         #   Windows Image Acquisition (WIA) scanning
 │   └── ui/                    # PySide6 interface
 │       ├── main_window.py     #   menus, toolbar, actions, orchestration
